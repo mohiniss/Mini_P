@@ -1,5 +1,4 @@
-# multi_stock_realtime_predictor.py
-from flask import Flask, render_template_string, request, jsonify, Response
+from flask import Flask, render_template_string, request, jsonify
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -7,12 +6,12 @@ from datetime import datetime, timedelta
 import time
 import threading
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
 import sqlite3
-import requests
 import json
 import warnings
 warnings.filterwarnings('ignore')
+
+DB_FILE = 'stocks.db'
 
 app = Flask(__name__)
 
@@ -511,19 +510,72 @@ REAL_TIME_HTML = '''
 '''
 
 class MultiStockPredictor:
-    def __init__(self):
+    def __init__(self, db_file=DB_FILE):
         self.model_cache = {}
         self.stock_data_cache = {}
         self.last_update = {}
-        
+        self.db_file = db_file
+        self._init_db()
+
+    # ----------------- Database utilities -----------------
+    def _init_db(self):
+        conn = sqlite3.connect(self.db_file)
+        cur = conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT,
+                timestamp TEXT,
+                current_price REAL,
+                pred_5min REAL,
+                pred_15min REAL,
+                confidence REAL,
+                signals TEXT
+            )
+        ''')
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS models (
+                symbol TEXT PRIMARY KEY,
+                last_trained TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+    def _save_prediction_to_db(self, symbol, pred_dict):
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO predictions (symbol, timestamp, current_price, pred_5min, pred_15min, confidence, signals) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (symbol, pred_dict['timestamp'].isoformat(), pred_dict['current_price'], pred_dict['predictions_5min'], pred_dict['predictions_15min'], pred_dict['confidence'], json.dumps(pred_dict['signals']))
+            )
+            conn.commit()
+        except Exception as e:
+            print('DB save error:', e)
+        finally:
+            conn.close()
+
+    def _update_model_table(self, symbol):
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cur = conn.cursor()
+            cur.execute("REPLACE INTO models (symbol, last_trained) VALUES (?, ?)", (symbol, datetime.now().isoformat()))
+            conn.commit()
+        except Exception as e:
+            print('DB model update error:', e)
+        finally:
+            conn.close()
+
+    # ----------------- Data fetching & features -----------------
     def get_live_price(self, symbol):
         """Get real-time stock price"""
         try:
             stock = yf.Ticker(symbol)
             info = stock.info
-            current_price = info.get('regularMarketPrice', info.get('currentPrice', 0))
-            
-            if not current_price:
+            current_price = info.get('regularMarketPrice', info.get('currentPrice', None))
+
+            if current_price is None:
                 hist = stock.history(period='1d', interval='1m')
                 if not hist.empty:
                     current_price = hist['Close'].iloc[-1]
@@ -536,7 +588,7 @@ class MultiStockPredictor:
                     }
                     base_price = base_prices.get(symbol, 100)
                     current_price = base_price + np.random.normal(0, base_price * 0.02)
-            
+
             return float(current_price)
         except Exception as e:
             print(f"Error getting live price for {symbol}: {e}")
@@ -546,34 +598,17 @@ class MultiStockPredictor:
                 'AMD': 120, 'INTC': 40
             }
             base_price = base_prices.get(symbol, 100)
-            return base_price + np.random.normal(0, base_price * 0.02)
+            return float(base_price + np.random.normal(0, base_price * 0.02))
 
     def get_intraday_data(self, symbol, period='2d', interval='5m'):
         """Get intraday data for real-time prediction"""
         try:
             stock = yf.Ticker(symbol)
             data = stock.history(period=period, interval=interval)
-            
+
             if data.empty:
-                # Generate realistic sample data
-                base_prices = {
-                    'AAPL': 180, 'GOOGL': 140, 'MSFT': 330, 'TSLA': 200,
-                    'NVDA': 450, 'AMZN': 150, 'META': 320, 'NFLX': 500,
-                    'AMD': 120, 'INTC': 40
-                }
-                base_price = base_prices.get(symbol, 100)
-                
-                dates = pd.date_range(end=datetime.now(), periods=100, freq='5min')
-                prices = [base_price + i * 0.1 + np.random.normal(0, base_price * 0.01) for i in range(100)]
-                
-                data = pd.DataFrame({
-                    'Open': prices,
-                    'High': [p + abs(np.random.normal(0, base_price * 0.005)) for p in prices],
-                    'Low': [p - abs(np.random.normal(0, base_price * 0.005)) for p in prices],
-                    'Close': prices,
-                    'Volume': [abs(np.random.normal(1000000, 100000)) for _ in prices]
-                }, index=dates)
-            
+                return self.generate_sample_data(symbol)
+
             # Calculate technical indicators
             data['Returns'] = data['Close'].pct_change()
             data['Volatility'] = data['Close'].rolling(10).std()
@@ -581,17 +616,17 @@ class MultiStockPredictor:
             data['MA_5'] = data['Close'].rolling(5).mean()
             data['MA_10'] = data['Close'].rolling(10).mean()
             data['MA_20'] = data['Close'].rolling(20).mean()
-            
+
             # RSI calculation
             delta = data['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rs = gain / loss
             data['RSI'] = 100 - (100 / (1 + rs))
-            
+
             data = data.dropna()
             return data
-            
+
         except Exception as e:
             print(f"Error getting intraday data for {symbol}: {e}")
             return self.generate_sample_data(symbol)
@@ -604,10 +639,10 @@ class MultiStockPredictor:
             'AMD': 120, 'INTC': 40
         }
         base_price = base_prices.get(symbol, 100)
-        
+
         dates = pd.date_range(end=datetime.now(), periods=50, freq='5min')
         prices = [base_price + i * 0.1 + np.random.normal(0, base_price * 0.01) for i in range(50)]
-        
+
         data = pd.DataFrame({
             'Open': prices,
             'High': [p + abs(np.random.normal(0, base_price * 0.005)) for p in prices],
@@ -615,7 +650,7 @@ class MultiStockPredictor:
             'Close': prices,
             'Volume': [abs(np.random.normal(1000000, 100000)) for _ in prices]
         }, index=dates)
-        
+
         # Calculate basic features
         data['Returns'] = data['Close'].pct_change()
         data['Volatility'] = data['Close'].rolling(10).std()
@@ -623,50 +658,52 @@ class MultiStockPredictor:
         data['MA_5'] = data['Close'].rolling(5).mean()
         data['MA_10'] = data['Close'].rolling(10).mean()
         data['RSI'] = 50 + np.random.normal(0, 10, len(data))
-        
+
         return data.dropna()
 
     def create_features(self, data):
         """Create features for prediction"""
-        if len(data) < 20:
-            return None, None, None
-            
+        if data is None or len(data) < 20:
+            return None, None
+
         features = []
         targets_5min = []
-        
+
+        # start after some lookback
         for i in range(10, len(data) - 1):
             current = data.iloc[i]
             feature_vector = [
                 current['Close'],
-                current['MA_5'],
-                current['MA_10'],
-                current['RSI'],
-                current['Volatility'],
-                current['Volume_MA'],
-                data['Close'].iloc[i-1] if i > 0 else current['Close'],
-                data['Close'].iloc[i-2] if i > 1 else current['Close'],
+                current.get('MA_5', current['Close']),
+                current.get('MA_10', current['Close']),
+                current.get('RSI', 50),
+                current.get('Volatility', 0),
+                current.get('Volume_MA', 0),
+                data['Close'].iloc[i - 1] if i > 0 else current['Close'],
+                data['Close'].iloc[i - 2] if i > 1 else current['Close'],
             ]
-            
+
             features.append(feature_vector)
             targets_5min.append(data['Close'].iloc[i + 1])
-        
+
         if len(features) == 0:
             return None, None
-            
+
         return np.array(features), np.array(targets_5min)
 
+    # ----------------- Training & Prediction -----------------
     def train_model(self, symbol):
         """Train model for a stock"""
         try:
             data = self.get_intraday_data(symbol)
             if data is None or len(data) < 30:
                 return False
-                
+
             features, targets_5min = self.create_features(data)
-            
+
             if features is None or len(features) < 15:
                 return False
-            
+
             model = RandomForestRegressor(
                 n_estimators=30,
                 max_depth=8,
@@ -674,92 +711,37 @@ class MultiStockPredictor:
                 n_jobs=-1
             )
             model.fit(features, targets_5min)
-            
+
             self.model_cache[symbol] = {
                 'model': model,
                 'last_trained': datetime.now(),
                 'data': data
             }
-            
+
+            # store model metadata in DB
+            self._update_model_table(symbol)
+
             return True
-            
+
         except Exception as e:
             print(f"Training error for {symbol}: {e}")
             return False
 
-    def predict_stock(self, symbol):
-        """Make prediction for a single stock"""
-        try:
-            data = self.get_intraday_data(symbol)
-            if data is None or len(data) < 20:
-                return self.generate_demo_prediction(symbol)
-                
-            # Train model if needed
-            if (symbol not in self.model_cache or 
-                datetime.now() - self.model_cache[symbol]['last_trained'] > timedelta(minutes=30)):
-                if not self.train_model(symbol):
-                    return self.generate_demo_prediction(symbol)
-            
-            features, _ = self.create_features(data)
-            if features is None or len(features) == 0:
-                return self.generate_demo_prediction(symbol)
-                
-            last_features = features[-1].reshape(1, -1)
-            pred_5min = self.model_cache[symbol]['model'].predict(last_features)[0]
-            
-            current_price = data['Close'].iloc[-1]
-            confidence = self.calculate_confidence(data)
-            signals = self.generate_signals(current_price, pred_5min, data)
-            
-            # Store in cache
-            self.stock_data_cache[symbol] = {
-                'current_price': current_price,
-                'predictions_5min': pred_5min,
-                'predictions_15min': pred_5min * 1.002,  # Simple extrapolation
-                'confidence': confidence,
-                'signals': signals,
-                'timestamp': datetime.now()
-            }
-            
-            return self.stock_data_cache[symbol]
-            
-        except Exception as e:
-            print(f"Prediction error for {symbol}: {e}")
-            return self.generate_demo_prediction(symbol)
-
-    def generate_demo_prediction(self, symbol):
-        """Generate demo prediction when real prediction fails"""
-        current_price = self.get_live_price(symbol)
-        change = np.random.normal(0, 0.02)  # Random change between -2% to +2%
-        pred_5min = current_price * (1 + change)
-        
-        return {
-            'current_price': current_price,
-            'predictions_5min': pred_5min,
-            'predictions_15min': pred_5min * (1 + change * 1.5),
-            'confidence': max(60, min(90, 75 + np.random.normal(0, 10))),
-            'signals': [
-                {'name': 'Trend', 'value': f'{change*100:+.2f}%', 'type': 'BUY' if change > 0 else 'SELL'},
-                {'name': 'Volatility', 'value': 'Medium', 'type': 'HOLD'}
-            ],
-            'timestamp': datetime.now()
-        }
-
     def calculate_confidence(self, data):
         """Calculate prediction confidence"""
         try:
-            if len(data) < 10:
+            if data is None or len(data) < 10:
                 return 75.0
             volatility = data['Returns'].std()
             confidence = 80.0 - (abs(volatility) * 1000)
-            return max(60.0, min(90.0, confidence))
-        except:
+            return float(max(60.0, min(90.0, confidence)))
+        except Exception:
             return 75.0
 
     def generate_signals(self, current_price, pred_5min, data):
         """Generate trading signals"""
         signals = []
-        
+
         try:
             # Price momentum
             change = ((pred_5min - current_price) / current_price * 100)
@@ -769,9 +751,9 @@ class MultiStockPredictor:
                 signals.append({'name': 'Momentum', 'value': f'{change:.2f}%', 'type': 'SELL'})
             else:
                 signals.append({'name': 'Momentum', 'value': f'{change:.2f}%', 'type': 'HOLD'})
-            
+
             # RSI signal
-            if len(data) > 0 and 'RSI' in data.columns:
+            if data is not None and 'RSI' in data.columns and len(data) > 0:
                 rsi = data['RSI'].iloc[-1]
                 if rsi < 30:
                     signals.append({'name': 'RSI', 'value': f'{rsi:.1f}', 'type': 'BUY'})
@@ -779,12 +761,84 @@ class MultiStockPredictor:
                     signals.append({'name': 'RSI', 'value': f'{rsi:.1f}', 'type': 'SELL'})
                 else:
                     signals.append({'name': 'RSI', 'value': f'{rsi:.1f}', 'type': 'HOLD'})
-                    
+
         except Exception as e:
             print(f"Error generating signals: {e}")
             signals.append({'name': 'System', 'value': 'Active', 'type': 'HOLD'})
-        
+
         return signals
+
+    def generate_demo_prediction(self, symbol):
+        """Generate demo prediction when real prediction fails"""
+        current_price = self.get_live_price(symbol)
+        change = np.random.normal(0, 0.02)  # Random change between -2% to +2%
+        pred_5min = current_price * (1 + change)
+
+        return {
+            'current_price': float(current_price),
+            'predictions_5min': float(pred_5min),
+            'predictions_15min': float(pred_5min * (1 + change * 1.5)),
+            'confidence': int(max(60, min(90, 75 + np.random.normal(0, 10)))),
+            'signals': [
+                {'name': 'Trend', 'value': f'{change*100:+.2f}%', 'type': 'BUY' if change > 0 else 'SELL'},
+                {'name': 'Volatility', 'value': 'Medium', 'type': 'HOLD'}
+            ],
+            'timestamp': datetime.now()
+        }
+
+    def predict_stock(self, symbol):
+        """Make prediction for a single stock"""
+        try:
+            data = self.get_intraday_data(symbol)
+            if data is None or len(data) < 20:
+                demo = self.generate_demo_prediction(symbol)
+                # Save demo to DB as well
+                self._save_prediction_to_db(symbol, demo)
+                return demo
+
+            # Train model if needed
+            if (symbol not in self.model_cache or
+                datetime.now() - self.model_cache[symbol]['last_trained'] > timedelta(minutes=30)):
+                self.train_model(symbol)
+
+            features, _ = self.create_features(data)
+            if features is None or len(features) == 0:
+                demo = self.generate_demo_prediction(symbol)
+                self._save_prediction_to_db(symbol, demo)
+                return demo
+
+            last_features = features[-1].reshape(1, -1)
+            model = self.model_cache.get(symbol, {}).get('model', None)
+            if model is None:
+                demo = self.generate_demo_prediction(symbol)
+                self._save_prediction_to_db(symbol, demo)
+                return demo
+
+            pred_5min = float(model.predict(last_features)[0])
+
+            current_price = float(data['Close'].iloc[-1])
+            confidence = float(self.calculate_confidence(data))
+            signals = self.generate_signals(current_price, pred_5min, data)
+
+            result = {
+                'current_price': current_price,
+                'predictions_5min': pred_5min,
+                'predictions_15min': float(pred_5min * 1.002),
+                'confidence': int(confidence),
+                'signals': signals,
+                'timestamp': datetime.now()
+            }
+
+            # Cache and save
+            self.stock_data_cache[symbol] = result
+            self._save_prediction_to_db(symbol, result)
+            return result
+
+        except Exception as e:
+            print(f"Prediction error for {symbol}: {e}")
+            demo = self.generate_demo_prediction(symbol)
+            self._save_prediction_to_db(symbol, demo)
+            return demo
 
     def get_all_predictions(self, symbols):
         """Get predictions for multiple stocks"""
@@ -792,6 +846,25 @@ class MultiStockPredictor:
         for symbol in symbols:
             predictions[symbol] = self.predict_stock(symbol)
         return predictions
+
+    # ----------------- DB read helpers -----------------
+    def get_recent_predictions(self, symbol, limit=50):
+        conn = sqlite3.connect(self.db_file)
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp, current_price, pred_5min, pred_15min, confidence, signals FROM predictions WHERE symbol=? ORDER BY id DESC LIMIT ?", (symbol, limit))
+        rows = cur.fetchall()
+        conn.close()
+        results = []
+        for r in rows:
+            results.append({
+                'timestamp': r[0],
+                'current_price': r[1],
+                'pred_5min': r[2],
+                'pred_15min': r[3],
+                'confidence': r[4],
+                'signals': json.loads(r[5]) if r[5] else []
+            })
+        return results
 
 # Initialize predictor
 predictor = MultiStockPredictor()
@@ -805,30 +878,62 @@ def index():
 def get_live_data(symbol):
     """API endpoint for live stock data"""
     try:
-        prediction_data = predictor.predict_stock(symbol)
+        prediction_data = predictor.predict_stock(symbol.upper())
+        # convert timestamp to iso
+        if isinstance(prediction_data.get('timestamp'), datetime):
+            prediction_data['timestamp'] = prediction_data['timestamp'].isoformat()
         return jsonify(prediction_data)
     except Exception as e:
         print(f"API error for {symbol}: {e}")
-        return jsonify(predictor.generate_demo_prediction(symbol))
+        demo = predictor.generate_demo_prediction(symbol.upper())
+        if isinstance(demo.get('timestamp'), datetime):
+            demo['timestamp'] = demo['timestamp'].isoformat()
+        return jsonify(demo)
 
 @app.route('/api/batch')
 def get_batch_data():
     """API endpoint for batch stock data"""
-    symbols = request.args.get('symbols', '').split(',')
-    if not symbols or symbols[0] == '':
+    symbols = request.args.get('symbols', '').upper().split(',')
+    symbols = [s.strip() for s in symbols if s.strip()]
+    if not symbols:
         symbols = ['AAPL', 'MSFT', 'TSLA']
-    
+
     predictions = predictor.get_all_predictions(symbols)
+    # convert timestamps
+    for sym, p in predictions.items():
+        if isinstance(p.get('timestamp'), datetime):
+            p['timestamp'] = p['timestamp'].isoformat()
     return jsonify(predictions)
 
 @app.route('/api/stats')
 def get_stats():
     """API endpoint for system statistics"""
-    return jsonify({
-        'total_models': len(predictor.model_cache),
-        'cache_size': len(predictor.stock_data_cache),
-        'status': 'running'
-    })
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM predictions")
+        total_preds = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM models")
+        total_models = cur.fetchone()[0]
+        conn.close()
+
+        return jsonify({
+            'total_models': total_models,
+            'total_predictions': total_preds,
+            'cache_size': len(predictor.stock_data_cache),
+            'status': 'running'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+@app.route('/api/history/<symbol>')
+def get_history(symbol):
+    """Return recent predictions from DB"""
+    try:
+        rows = predictor.get_recent_predictions(symbol.upper())
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 if __name__ == '__main__':
     print("STARTING MULTI-STOCK REAL-TIME PREDICTION SYSTEM")
@@ -844,19 +949,19 @@ if __name__ == '__main__':
     print("Server: http://localhost:5000")
     print("")
     print("Pre-training models for popular stocks...")
-    
-    # Pre-train for popular stocks
-    for symbol in ['AAPL', 'MSFT', 'TSLA', 'GOOGL', 'NVDA']:
+
+    # Pre-train for popular stocks (non-blocking thread-safe)
+    popular = ['AAPL', 'MSFT', 'TSLA', 'GOOGL', 'NVDA']
+    for symbol in popular:
         print(f"  Training {symbol}...", end=" ")
         if predictor.train_model(symbol):
             print("✓")
         else:
             print("✗ (using demo mode)")
-        time.sleep(0.5)
-    
+        time.sleep(0.3)
+
     print("")
     print("System ready! Open http://localhost:5000 in your browser")
     print("=" * 50)
-    
+
     app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
-    

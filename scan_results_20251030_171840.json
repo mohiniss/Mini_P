@@ -1,0 +1,84 @@
+{
+  "vulnerabilities": [
+    {
+      "type": "vulnerability",
+      "description": "Weak password policy detected",
+      "severity": "Medium",
+      "timestamp": "2025-10-30T17:18:37.867556"
+    },
+    {
+      "type": "vulnerability",
+      "description": "Outdated browser extensions present",
+      "severity": "Medium",
+      "timestamp": "2025-10-30T17:18:37.869648"
+    },
+    {
+      "type": "vulnerability",
+      "description": "Unnecessary network services running",
+      "severity": "Medium",
+      "timestamp": "2025-10-30T17:18:37.869757"
+    },
+    {
+      "type": "vulnerability",
+      "description": "Auto-run features enabled for removable media",
+      "severity": "Medium",
+      "timestamp": "2025-10-30T17:18:37.875097"
+    },
+    {
+      "type": "vulnerability",
+      "description": "Firewall may not be properly configured",
+      "severity": "Medium",
+      "timestamp": "2025-10-30T17:18:37.875836"
+    }
+  ],
+  "attacks": [
+    {
+      "type": "attack",
+      "description": "Potential ransomware activity",
+      "severity": "Critical",
+      "timestamp": "2025-10-30T17:18:40.526810"
+    }
+  ],
+  "ports": [
+    {
+      "port": 21,
+      "status": "VULNERABLE",
+      "timestamp": "2025-10-30T17:18:40.642048"
+    },
+    {
+      "port": 995,
+      "status": "VULNERABLE",
+      "timestamp": "2025-10-30T17:18:40.642156"
+    },
+    {
+      "port": 445,
+      "status": "VULNERABLE",
+      "timestamp": "2025-10-30T17:18:40.642233"
+    },
+    {
+      "port": 1723,
+      "status": "VULNERABLE",
+      "timestamp": "2025-10-30T17:18:40.642315"
+    },
+    {
+      "port": 3306,
+      "status": "VULNERABLE",
+      "timestamp": "2025-10-30T17:18:40.642419"
+    },
+    {
+      "port": 5432,
+      "status": "VULNERABLE",
+      "timestamp": "2025-10-30T17:18:40.642542"
+    },
+    {
+      "port": 3389,
+      "status": "VULNERABLE",
+      "timestamp": "2025-10-30T17:18:40.642612"
+    },
+    {
+      "port": 139,
+      "status": "VULNERABLE",
+      "timestamp": "2025-10-30T17:18:40.642685"
+    }
+  ]
+}
